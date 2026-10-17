@@ -20,6 +20,22 @@ Rendering is done by [OpenTUI](https://opentui.com)'s `<image>` renderable, so t
 | Terminals with Sixel | Sixel |
 | tmux and everything else | Unicode blocks (layout is visible, text is not readable) |
 
+## Draft and sent previews (native settings)
+
+OpenCode v2 renders attached and sent images itself when you enable both options in `~/.config/opencode/cli.json`:
+
+```json
+{
+  "prompt": { "image_preview": true },
+  "session": { "image_preview": true }
+}
+```
+
+- `prompt.image_preview`: thumbnails above the prompt input while you write (up to 3, then "+N more").
+- `session.image_preview`: real thumbnails inside the sent message and in tool results; click one for a full preview with ←/→ navigation.
+
+This plugin complements those with the queued-image band (hover card), the session gallery (`/images`) and click-to-open in the system viewer.
+
 ## Install
 
 ```sh
@@ -58,7 +74,7 @@ bun run typecheck
 
 ### Why the band shows queued images, not the live draft
 
-OpenCode 2.0.32 does not expose the composer's in-progress attachments to plugins, so a plugin cannot know which images you are about to send while you type. The host itself can show draft thumbnails: enable `prompt.image_preview` in `cli.json` (and `session.image_preview` for images in the transcript). This plugin complements those with the hover-card interaction, queued-state awareness and the session gallery.
+OpenCode 2.0.32 does not expose the composer's in-progress attachments to plugins, so a plugin cannot know which images you are about to send while you type. For the draft and the transcript, use the native options above; this plugin covers what plugins can see: the queued inbox (hover cards) and the whole session (gallery).
 
 ## License
 
