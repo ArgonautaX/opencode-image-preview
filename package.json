@@ -1,0 +1,44 @@
+{
+  "name": "opencode-image-preview",
+  "version": "0.1.0",
+  "description": "Hover image previews for the OpenCode TUI, inspired by better-claude's image-preview",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "image",
+    "preview",
+    "tui",
+    "opentui"
+  ],
+  "dependencies": {
+    "@opencode/plugin": "^2.0.32"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.17",
+    "@opentui/solid": ">=0.5.17",
+    "solid-js": ">=1.9.0"
+  },
+  "devDependencies": {
+    "@opencode/theme": "^2.0.32",
+    "@opentui/core": "^0.5.17",
+    "@opentui/solid": "^0.5.17",
+    "@types/bun": "latest",
+    "solid-js": "^1.9.0",
+    "typescript": "^5.8.2"
+  }
+}
