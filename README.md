@@ -16,14 +16,22 @@ Inspired by [`better-claude`'s image-preview](https://github.com/midudev/better-
 
 ## What it does
 
-Paste an image into the prompt and OpenCode turns it into an `[Image N]` token in
-the composer. While that token is there — before you send anything — hover it and
-a floating card shows the picture, with the same card following the pointer onto
-it so it does not flicker. Move the pointer away and the card closes. Click a
-token to place the editor cursor on it.
+Paste an image, or type or paste a path to one, and the plugin matches it: while
+an `[Image N]` token or an image path is in the composer — before you send
+anything — hover it and a floating card shows the picture, with the same card
+following the pointer onto it so it does not flicker. Move the pointer away and
+the card closes. Click it to open the image in your system viewer (Preview on
+macOS) and close the card; when the capture is missing, the click places the
+editor cursor on the token instead.
 
-That is the whole plugin: no strip above the prompt, no gallery, no commands. The
-preview only appears while you hover.
+The card shows the file name, the pixel dimensions and the size (`1920×1080 · 151 KB`,
+like better-claude's caption) and carries two actions: `↗ open` opens the image,
+`⧉ copy` puts it on the system clipboard.
+
+`/image-preview` — or **Toggle image preview** in the command palette (`ctrl+p`)
+— turns the overlay off and on; the choice survives restarts.
+
+No strip above the prompt, no gallery: the preview only appears while you hover.
 
 Rendering is done by [OpenTUI](https://opentui.com)'s `<image>` renderable, so the
 picture uses the best protocol each terminal supports:
@@ -41,20 +49,33 @@ plugins, so this plugin works around that by watching the composer editor
 renderable itself:
 
 - On every render frame it reads the focused editor (`traits.role === "prompt"`)
-  and computes the on-screen rectangle of each `[Image N]` token from the buffer
-  text, line info, scroll offset and layout.
+  and computes the on-screen rectangle of each image target from the buffer text,
+  line info, scroll offset and layout. Targets are the `[Image N]` tokens and the
+  image paths in the text (`/abs/shot.png`, `~/shots/a.png`, `file://` URLs,
+  quoted or not), resolved to absolute paths.
 - It wraps the editor's `insertText` so it sees the exact moment a paste becomes
   an `[Image N]` token, and captures the image from the system clipboard right
   then — the clipboard still holds what you pasted. Both a copied image
   (captured as PNG, converting TIFF when needed) and pasted path text (captured
-  as a file path) work.
+  as a file path) work. Paths typed by hand need no capture: they are read
+  straight from disk.
 - Invisible hover targets are rendered from the root `app` slot, absolutely
-  positioned on top of each token, so the token text stays visible and the
-  composer layout is untouched.
+  positioned on top of each target, so the text stays visible and the composer
+  layout is untouched.
+- The card reads the pixel dimensions and byte size lazily, from the PNG, GIF or
+  JPEG header, and the copy action reuses the platform clipboard tools.
 
 The capture is a best effort: if the clipboard no longer holds the image, or the
 platform has no clipboard reader (only macOS and Linux are implemented), the
 card shows `preview unavailable` for that token.
+
+Clicking a target writes an inline capture to a temp file
+(`$TMPDIR/opencode-image-preview/`, named after the payload so repeated clicks
+reuse the same file) and opens it with the system viewer: `open -a Preview` on
+macOS, `explorer` on Windows and `xdg-open` elsewhere — the same commands
+better-claude uses. `⧉ copy` puts the image on the clipboard with `osascript`
+(converting to PNG with `sips` when needed) on macOS, `wl-copy`/`xclip` on Linux
+and `Set-Clipboard` on Windows.
 
 ## Composer and transcript
 
@@ -122,6 +143,14 @@ math is verified end to end in a tmux session by simulating SGR mouse moves; if
 you do that, remove any test plugins from the location first — two plugins
 rendering zones at the same cells shadow each other in the hit grid and the
 hover appears broken.
+
+## Branches
+
+- `main` — released code, tagged for releases; only receives merges from `develop`.
+- `develop` — integration branch; every feature and fix lands here first.
+- `feature/<name>`, `fix/<name>`, `docs/<name>`, `chore/<name>` — one unit of
+  work each, branched from `develop` and merged back with `git merge --no-ff`
+  (or a pull request) once `bun test` and `bun run typecheck` pass.
 
 ## License
 
