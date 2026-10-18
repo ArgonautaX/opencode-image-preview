@@ -1,8 +1,19 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createMemo, createSignal, For, onCleanup, Show } from "solid-js"
-import { captureClipboard, captionOf, imageZones, openInViewer, type ImageZone, type ZoneGeometry } from "./images"
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js"
+import {
+  captureClipboard,
+  captionOf,
+  copyImageToClipboard,
+  describeSource,
+  imageZones,
+  infoLine,
+  openInViewer,
+  type ImageZone,
+  type SourceInfo,
+  type ZoneGeometry,
+} from "./images"
 
 /** Grace period so the pointer can travel from a token onto the floating card. */
 const HOVER_GRACE_MS = 120
@@ -73,12 +84,12 @@ function installInsertHook(editor: ComposerEditor, capture: (token: string) => v
 }
 
 /**
- * Invisible hover targets over every `[Image N]` token of the composer, plus a
- * floating preview card. The zones live in the root `app` slot so they can sit
- * on top of the composer without disturbing its layout; the token text stays
- * visible underneath.
+ * Invisible hover targets over every `[Image N]` token and every image path in
+ * the composer, plus a floating preview card with open/copy actions. The zones
+ * live in the root `app` slot so they can sit on top of the composer without
+ * disturbing its layout; the text stays visible underneath.
  */
-function HoverOverlay() {
+function HoverOverlay(props: { prefs: { readonly enabled: boolean } }) {
   const context = usePlugin()
   const dimensions = useTerminalDimensions()
   const [zones, setZones] = createSignal<Zone[]>([])
@@ -124,7 +135,36 @@ function HoverOverlay() {
     }, HOVER_GRACE_MS)
   }
 
+  const sourceFor = (zone: Zone) => (zone.kind === "path" ? zone.path : sources().get(zone.key))
+
+  const openZone = (zone: Zone) => {
+    const source = sourceFor(zone)
+    if (!source) return false
+    // Like better-claude: opening closes the card; moving the pointer back on
+    // the target opens the card again.
+    cancel()
+    setHovered((current) => (current?.key === zone.key ? undefined : current))
+    void openInViewer(source)
+    return true
+  }
+
+  const copyZone = (zone: Zone) => {
+    const source = sourceFor(zone)
+    if (!source) return
+    void copyImageToClipboard(source).then((ok) => {
+      context.ui.toast.show({
+        message: ok ? "Image copied to the clipboard" : "Could not copy the image",
+        variant: ok ? "success" : "error",
+      })
+    })
+  }
+
   const onFrame = () => {
+    if (!props.prefs.enabled) {
+      if (zones().length > 0) setZones([])
+      if (hovered() !== undefined) setHovered(undefined)
+      return
+    }
     const focused = context.renderer.currentFocusedEditor as ComposerEditor | null
     if (focused && (focused.traits as { role?: string } | undefined)?.role === "prompt") editor = focused
     const current = editor
@@ -151,7 +191,30 @@ function HoverOverlay() {
   const source = createMemo(() => {
     const zone = hovered()
     if (!zone) return undefined
-    return sources().get(zone.key)
+    return zone.kind === "path" ? zone.path : sources().get(zone.key)
+  })
+
+  const [infos, setInfos] = createSignal(new Map<string, SourceInfo>())
+
+  createEffect(() => {
+    const src = source()
+    if (!src || infos().has(src)) return
+    void describeSource(src).then((info) => {
+      setInfos((current) => {
+        const next = new Map(current)
+        next.set(src, info)
+        return next
+      })
+    })
+  })
+
+  const caption = createMemo(() => {
+    const zone = hovered()
+    if (!zone) return ""
+    const src = source()
+    const label = captionOf(zone, src)
+    const line = infoLine(src === undefined ? {} : (infos().get(src) ?? {}))
+    return line ? `${label} · ${line}` : label
   })
 
   const cardWidth = () => Math.max(24, Math.min(72, dimensions().width - 10))
@@ -160,7 +223,7 @@ function HoverOverlay() {
   const cardTop = () => {
     const zone = hovered()
     if (!zone) return 0
-    const total = cardHeight() + 3
+    const total = cardHeight() + 4
     const above = zone.row - total - 1
     if (above >= 0) return above
     return Math.max(0, Math.min(zone.row + 2, dimensions().height - total - 1))
@@ -186,15 +249,7 @@ function HoverOverlay() {
             onMouseOver={() => show(zone)}
             onMouseOut={() => hide(zone)}
             onMouseUp={() => {
-              const captured = sources().get(zone.key)
-              if (captured) {
-                // Like better-claude: the click opens the image and closes the
-                // card; moving the pointer back on the token opens it again.
-                cancel()
-                setHovered((current) => (current?.key === zone.key ? undefined : current))
-                void openInViewer(captured)
-                return
-              }
+              if (openZone(zone)) return
               if (!editor || editor.isDestroyed) return
               editor.focus()
               editor.cursorOffset = zone.start
@@ -241,8 +296,18 @@ function HoverOverlay() {
               )}
             </Show>
             <text fg={context.theme.text.muted} wrapMode="none" truncate onMouseOver={() => show(zone())}>
-              {captionOf(zone(), source())}
+              {caption()}
             </text>
+            <Show when={source()}>
+              <box flexDirection="row" columnGap={2} onMouseOver={() => show(zone())}>
+                <text fg={context.theme.text.muted} wrapMode="none" onMouseUp={() => openZone(zone())}>
+                  {"↗ open"}
+                </text>
+                <text fg={context.theme.text.muted} wrapMode="none" onMouseUp={() => copyZone(zone())}>
+                  {"⧉ copy"}
+                </text>
+              </box>
+            </Show>
           </box>
         )}
       </Show>
@@ -253,12 +318,41 @@ function HoverOverlay() {
 export default Plugin.define({
   id: "image-preview",
   setup(context) {
+    /** Durable preferences: the toggle survives hot reloads and TUI restarts. */
+    const [prefs, updatePreferences] = context.storage.store("image-preview.preferences", {
+      initial: { enabled: true },
+    })
+
+    context.keymap.layer(() => ({
+      mode: "global",
+      commands: [
+        {
+          id: "image-preview.toggle",
+          title: "Toggle image preview",
+          description: "Enable or disable the hover previews over [Image N] tokens and image paths",
+          group: "Image preview",
+          palette: true,
+          slash: { name: "image-preview", aliases: ["img-preview"] },
+          run: () => {
+            const enabled = !prefs.enabled
+            void updatePreferences((draft) => {
+              draft.enabled = enabled
+            })
+            context.ui.toast.show({
+              message: enabled ? "Image preview enabled" : "Image preview disabled",
+              variant: "info",
+            })
+          },
+        },
+      ],
+    }))
+
     // The gallery used to open a session panel; close it in case a hot reload
     // replaced the plugin while the panel was still open.
     context.ui.panel.close()
     const overlay = context.ui.slot({
       append: "app",
-      render: () => <HoverOverlay />,
+      render: () => <HoverOverlay prefs={prefs} />,
     })
     return () => overlay()
   },
