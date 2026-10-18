@@ -1,14 +1,20 @@
 import { describe, expect, test } from "bun:test"
+import { existsSync, rmSync } from "node:fs"
 import {
   captionOf,
   displayWidth,
+  extensionFor,
   findImageTokens,
   imageZones,
   isImagePath,
+  materialize,
   parseCapture,
   pathFromText,
   type ZoneGeometry,
 } from "../src/images"
+
+const PNG_DATA =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
 const geometry = (overrides: Partial<ZoneGeometry>): ZoneGeometry => ({
   text: "",
@@ -176,5 +182,37 @@ describe("captionOf", () => {
     expect(captionOf({ number: 2 }, "data:image/png;base64,AAAA")).toBe("[Image 2] clipboard")
     expect(captionOf({ number: 3 }, "/tmp/my shot.png")).toBe("[Image 3] my shot.png")
     expect(captionOf({ number: 1 }, undefined)).toBe("[Image 1]")
+  })
+})
+
+describe("extensionFor", () => {
+  test("maps mime types to file extensions", () => {
+    expect(extensionFor("image/png")).toBe(".png")
+    expect(extensionFor("image/jpeg")).toBe(".jpg")
+    expect(extensionFor("image/svg+xml")).toBe(".svg")
+  })
+
+  test("falls back to .png without a usable subtype", () => {
+    expect(extensionFor("image")).toBe(".png")
+  })
+})
+
+describe("materialize", () => {
+  test("returns file paths untouched", async () => {
+    expect(await materialize("/tmp/shot.png")).toBe("/tmp/shot.png")
+  })
+
+  test("writes an inline image to a temp file, reusing it per payload", async () => {
+    const source = `data:image/png;base64,${PNG_DATA}`
+    const file = await materialize(source)
+    expect(file?.endsWith(".png")).toBe(true)
+    expect(file !== undefined && existsSync(file)).toBe(true)
+    expect(await materialize(source)).toBe(file)
+    if (file) rmSync(file, { force: true })
+  })
+
+  test("rejects malformed or empty data URIs", async () => {
+    expect(await materialize("data:image/png;base64")).toBeUndefined()
+    expect(await materialize("data:image/png;base64,")).toBeUndefined()
   })
 })

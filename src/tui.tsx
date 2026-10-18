@@ -2,7 +2,7 @@
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js"
-import { captureClipboard, captionOf, imageZones, type ImageZone, type ZoneGeometry } from "./images"
+import { captureClipboard, captionOf, imageZones, openInViewer, type ImageZone, type ZoneGeometry } from "./images"
 
 /** Grace period so the pointer can travel from a token onto the floating card. */
 const HOVER_GRACE_MS = 120
@@ -186,6 +186,15 @@ function HoverOverlay() {
             onMouseOver={() => show(zone)}
             onMouseOut={() => hide(zone)}
             onMouseUp={() => {
+              const captured = sources().get(zone.key)
+              if (captured) {
+                // Like better-claude: the click opens the image and closes the
+                // card; moving the pointer back on the token opens it again.
+                cancel()
+                setHovered((current) => (current?.key === zone.key ? undefined : current))
+                void openInViewer(captured)
+                return
+              }
               if (!editor || editor.isDestroyed) return
               editor.focus()
               editor.cursorOffset = zone.start
