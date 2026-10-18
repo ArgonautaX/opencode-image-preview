@@ -4,6 +4,7 @@
   "description": "Hover image previews for the OpenCode TUI, inspired by better-claude's image-preview",
   "type": "module",
   "license": "MIT",
+  "packageManager": "bun@1.4.3",
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit"
