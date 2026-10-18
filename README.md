@@ -20,7 +20,9 @@ Paste an image into the prompt and OpenCode turns it into an `[Image N]` token i
 the composer. While that token is there — before you send anything — hover it and
 a floating card shows the picture, with the same card following the pointer onto
 it so it does not flicker. Move the pointer away and the card closes. Click a
-token to place the editor cursor on it.
+token to open the image in your system viewer (Preview on macOS) and close the
+card; when the capture is missing, the click places the editor cursor on the
+token instead.
 
 That is the whole plugin: no strip above the prompt, no gallery, no commands. The
 preview only appears while you hover.
@@ -55,6 +57,11 @@ renderable itself:
 The capture is a best effort: if the clipboard no longer holds the image, or the
 platform has no clipboard reader (only macOS and Linux are implemented), the
 card shows `preview unavailable` for that token.
+
+Clicking a token writes the capture to a temp file (`$TMPDIR/opencode-image-preview/`,
+named after the payload so repeated clicks reuse the same file) and opens it with
+the system viewer: `open -a Preview` on macOS, `explorer` on Windows and
+`xdg-open` elsewhere — the same commands better-claude uses.
 
 ## Composer and transcript
 

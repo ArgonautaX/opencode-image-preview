@@ -1,4 +1,8 @@
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
+import { mkdir, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 /** One `[Image N]` placeholder found in the composer text. */
 export type ImageToken = { text: string; number: number; start: number; end: number }
@@ -235,4 +239,46 @@ export async function captureClipboard(): Promise<string | undefined> {
     if (process.platform === "linux") return await captureLinux()
   } catch {}
   return undefined
+}
+
+/** File extension for an image MIME type: image/jpeg becomes .jpg. */
+export function extensionFor(mime: string): string {
+  const subtype = mime.split("/")[1]?.split("+")[0] ?? "png"
+  return `.${subtype === "jpeg" ? "jpg" : subtype}`
+}
+
+/**
+ * The image as a local file so external programs can open it: paths are
+ * returned as they are, inline data URIs are written to a temp file named
+ * after the payload, so repeated clicks on the same capture reuse one file.
+ */
+export async function materialize(source: string): Promise<string | undefined> {
+  if (!source.startsWith("data:")) return source
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(source)
+  if (!match) return undefined
+  const [, mime, base64, payload] = match
+  if (!payload) return undefined
+  const directory = join(tmpdir(), "opencode-image-preview")
+  await mkdir(directory, { recursive: true })
+  const digest = createHash("sha1").update(payload).digest("hex").slice(0, 12)
+  const file = join(directory, `${digest}${extensionFor(mime ?? "image/png")}`)
+  await writeFile(file, Buffer.from(payload, base64 ? "base64" : "utf8"))
+  return file
+}
+
+/**
+ * Opens the image in the system viewer, with the same commands better-claude
+ * uses: Preview on macOS, Explorer on Windows and xdg-open elsewhere.
+ */
+export async function openInViewer(source: string): Promise<void> {
+  const file = await materialize(source).catch(() => undefined)
+  if (!file) return
+  const command =
+    process.platform === "darwin"
+      ? ["open", "-a", "Preview", file]
+      : process.platform === "win32"
+        ? ["explorer", file]
+        : ["xdg-open", file]
+  const child = spawn(command[0]!, command.slice(1), { detached: true, stdio: "ignore" })
+  child.unref()
 }
