@@ -1,167 +1,180 @@
 import { describe, expect, test } from "bun:test"
-import { captionOf, messageImages, pendingImages, sessionImages, type SessionImage } from "../src/images"
+import {
+  captionOf,
+  displayWidth,
+  findImageTokens,
+  imageZones,
+  isImagePath,
+  parseCapture,
+  pathFromText,
+  type ZoneGeometry,
+} from "../src/images"
 
-const PNG_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-const PNG_URI = `data:image/png;base64,${PNG_DATA}`
+const geometry = (overrides: Partial<ZoneGeometry>): ZoneGeometry => ({
+  text: "",
+  screenX: 10,
+  screenY: 5,
+  width: 80,
+  height: 3,
+  scrollY: 0,
+  offsetX: 0,
+  lineStartCols: [0],
+  lineWidthCols: [0],
+  lineSources: [0],
+  ...overrides,
+})
 
-type FakeInput = {
-  pending?: unknown[]
-  messages?: unknown[]
-}
-
-const context = (input: FakeInput) =>
-  ({
-    data: {
-      session: {
-        pending: { list: () => input.pending ?? [] },
-        message: { list: () => input.messages ?? [] },
-      },
-    },
-  }) as never
-
-describe("pendingImages", () => {
-  test("reads user inbox attachments and numbers them", () => {
-    const images = pendingImages(
-      context({
-        pending: [
-          {
-            type: "user",
-            id: "inbox_1",
-            payload: { text: "", files: [{ data: PNG_DATA, mime: "image/png", name: "a.png", source: { type: "inline" } }] },
-          },
-          { type: "compaction", payload: {} },
-        ],
-      }),
-      "ses_1",
-    )
-    expect(images).toHaveLength(1)
-    expect(images[0]!.number).toBe(1)
-    expect(images[0]!.queued).toBe(true)
-    expect(images[0]!.source).toBe(PNG_URI)
-    expect(images[0]!.name).toBe("a.png")
+describe("findImageTokens", () => {
+  test("finds a single token with its offsets", () => {
+    expect(findImageTokens("hello [Image 1] world")).toEqual([
+      { text: "[Image 1]", number: 1, start: 6, end: 15 },
+    ])
   })
 
-  test("keeps a data URI untouched and skips non-image files", () => {
-    const images = pendingImages(
-      context({
-        pending: [
-          {
-            type: "user",
-            id: "inbox_2",
-            payload: {
-              text: "",
-              files: [
-                { data: PNG_URI, mime: "image/png", source: { type: "inline" } },
-                { data: "hello", mime: "text/plain", source: { type: "inline" } },
-              ],
-            },
-          },
-        ],
-      }),
-      "ses_1",
-    )
-    expect(images).toHaveLength(1)
-    expect(images[0]!.source).toBe(PNG_URI)
+  test("finds several tokens in order", () => {
+    const tokens = findImageTokens("[Image 1] and [Image 2]")
+    expect(tokens.map((token) => token.number)).toEqual([1, 2])
+    expect(tokens[1]!.start).toBe(14)
+  })
+
+  test("ignores lookalikes and malformed tokens", () => {
+    expect(findImageTokens("[Image ] [Image one] image 1 [Image 12x]")).toEqual([])
+  })
+
+  test("handles multi-digit numbers", () => {
+    expect(findImageTokens("[Image 12]")[0]!.number).toBe(12)
   })
 })
 
-describe("messageImages", () => {
-  test("reads sent user attachments and tool file results", () => {
-    const images = messageImages(
-      context({
-        messages: [
-          {
-            type: "user",
-            id: "msg_1",
-            files: [{ data: PNG_DATA, mime: "image/png", name: "shot.png", source: { type: "inline" } }],
-          },
-          {
-            type: "assistant",
-            id: "msg_2",
-            content: [
-              { type: "text", text: "done" },
-              {
-                type: "tool",
-                id: "tool_1",
-                state: {
-                  status: "completed",
-                  content: [
-                    { type: "file", uri: "file:///tmp/out.png", mime: "image/png", name: "out.png" },
-                    { type: "file", uri: "file:///tmp/log.txt", mime: "text/plain" },
-                  ],
-                },
-              },
-              { type: "tool", id: "tool_2", state: { status: "running", content: [] } },
-            ],
-          },
-        ],
-      }),
-      "ses_1",
-    )
-    expect(images).toHaveLength(2)
-    expect(images[0]!.source).toBe(PNG_URI)
-    expect(images[0]!.queued).toBe(false)
-    expect(images[1]!.source).toBe("/tmp/out.png")
-    expect(images[1]!.name).toBe("out.png")
+describe("displayWidth", () => {
+  test("counts ascii characters as one cell", () => {
+    expect(displayWidth("[Image 1]")).toBe(9)
   })
 
-  test("resolves uri-sourced attachments to local paths", () => {
-    const images = messageImages(
-      context({
-        messages: [
-          {
-            type: "user",
-            id: "msg_3",
-            files: [{ data: "", mime: "image/jpeg", source: { type: "uri", uri: "file:///Users/me/photo.jpg" } }],
-          },
-        ],
-      }),
-      "ses_1",
-    )
-    expect(images).toHaveLength(1)
-    expect(images[0]!.source).toBe("/Users/me/photo.jpg")
+  test("counts wide characters as two cells", () => {
+    expect(displayWidth("日本語")).toBe(6)
+    expect(displayWidth("a日b")).toBe(4)
   })
 })
 
-describe("sessionImages", () => {
-  test("orders queued first, dedupes and numbers sequentially", () => {
-    const images = sessionImages(
-      context({
-        pending: [
-          {
-            type: "user",
-            id: "inbox_1",
-            payload: { text: "", files: [{ data: PNG_DATA, mime: "image/png", source: { type: "inline" } }] },
-          },
-        ],
-        messages: [
-          {
-            type: "user",
-            id: "msg_1",
-            files: [{ data: PNG_DATA, mime: "image/png", source: { type: "inline" } }],
-          },
-          {
-            type: "user",
-            id: "msg_2",
-            files: [{ data: PNG_URI.replace("iVBOR", "JVBER"), mime: "image/png", source: { type: "inline" } }],
-          },
-        ],
+describe("imageZones", () => {
+  test("places a token on the editor's first row", () => {
+    const zones = imageZones(geometry({ text: "[Image 1] hello", lineWidthCols: [14] }))
+    expect(zones).toEqual([{ text: "[Image 1]", number: 1, start: 0, end: 9, row: 5, col: 10, width: 9 }])
+  })
+
+  test("offsets columns by the text before the token", () => {
+    const zones = imageZones(geometry({ text: "look: [Image 1]", lineWidthCols: [15] }))
+    expect(zones[0]!.col).toBe(16)
+  })
+
+  test("splits a token wrapped across two visual lines", () => {
+    const zones = imageZones(
+      geometry({
+        text: "aaaaa[Image 1]bbb",
+        lineStartCols: [0, 12],
+        lineWidthCols: [12, 6],
+        lineSources: [0, 0],
       }),
-      "ses_1",
     )
-    expect(images.map((image: SessionImage) => image.number)).toEqual([1, 2])
-    expect(images[0]!.queued).toBe(true)
-    expect(images[1]!.queued).toBe(false)
+    expect(zones).toHaveLength(2)
+    expect(zones[0]!).toMatchObject({ row: 5, col: 15, width: 7 })
+    expect(zones[1]!).toMatchObject({ row: 6, col: 10, width: 2 })
+  })
+
+  test("maps tokens on later logical lines through lineSources", () => {
+    const zones = imageZones(
+      geometry({
+        text: "first\nsecond [Image 3]",
+        lineStartCols: [0, 0],
+        lineWidthCols: [5, 17],
+        lineSources: [0, 1],
+      }),
+    )
+    expect(zones[0]!).toMatchObject({ row: 6, col: 17, width: 9 })
+  })
+
+  test("skips tokens scrolled out of the editor", () => {
+    const zones = imageZones(
+      geometry({
+        text: "[Image 1]\nsecond",
+        height: 1,
+        scrollY: 1,
+        lineStartCols: [0, 0],
+        lineWidthCols: [9, 6],
+        lineSources: [0, 1],
+      }),
+    )
+    expect(zones).toEqual([])
+  })
+
+  test("clamps the zone to the editor's right edge", () => {
+    const zones = imageZones(
+      geometry({
+        text: "[Image 1]",
+        width: 5,
+        lineWidthCols: [9],
+      }),
+    )
+    expect(zones[0]!.width).toBe(5)
+  })
+
+  test("returns nothing without tokens", () => {
+    expect(imageZones(geometry({ text: "just text" }))).toEqual([])
+  })
+})
+
+describe("isImagePath", () => {
+  test("accepts common image extensions case-insensitively", () => {
+    expect(isImagePath("/tmp/shot.png")).toBe(true)
+    expect(isImagePath("/tmp/SHOT.JPG")).toBe(true)
+    expect(isImagePath("/tmp/pic.webp")).toBe(true)
+  })
+
+  test("rejects other files and plain text", () => {
+    expect(isImagePath("/tmp/notes.txt")).toBe(false)
+    expect(isImagePath("hello world")).toBe(false)
+  })
+})
+
+describe("pathFromText", () => {
+  test("accepts a bare path and a quoted path", () => {
+    expect(pathFromText("/tmp/shot.png")).toBe("/tmp/shot.png")
+    expect(pathFromText('"/tmp/my shot.png"')).toBe("/tmp/my shot.png")
+  })
+
+  test("decodes file URLs and picks the first image line", () => {
+    expect(pathFromText("file:///tmp/a%20b.png")).toBe("/tmp/a b.png")
+    expect(pathFromText("/tmp/notes.txt\n/tmp/photo.jpeg")).toBe("/tmp/photo.jpeg")
+  })
+
+  test("returns undefined when no line looks like an image", () => {
+    expect(pathFromText("hello\nworld")).toBeUndefined()
+  })
+})
+
+describe("parseCapture", () => {
+  test("turns png payloads into a data URI", () => {
+    const capture = parseCapture(JSON.stringify({ kind: "png", b64: "AAAA" }))
+    expect(capture).toEqual({ kind: "image", source: "data:image/png;base64,AAAA" })
+  })
+
+  test("turns clipboard text into a file source when it is an image path", () => {
+    const capture = parseCapture(JSON.stringify({ kind: "text", text: "/tmp/shot.png" }))
+    expect(capture).toEqual({ kind: "path", source: "/tmp/shot.png" })
+  })
+
+  test("reports none for unusable payloads", () => {
+    expect(parseCapture(JSON.stringify({ kind: "text", text: "hello" }))).toEqual({ kind: "none" })
+    expect(parseCapture(JSON.stringify({ kind: "none" }))).toEqual({ kind: "none" })
+    expect(parseCapture("not json")).toEqual({ kind: "none" })
   })
 })
 
 describe("captionOf", () => {
-  test("formats number, mime and name", () => {
-    expect(
-      captionOf({ key: "k", number: 3, mime: "image/png", name: "shot.png", source: PNG_URI, queued: false }),
-    ).toBe("[Image #3] PNG · shot.png")
-    expect(captionOf({ key: "k", number: 1, mime: "image/jpeg", source: PNG_URI, queued: false })).toBe(
-      "[Image #1] JPEG",
-    )
+  test("labels clipboard images and file paths", () => {
+    expect(captionOf({ number: 2 }, "data:image/png;base64,AAAA")).toBe("[Image 2] clipboard")
+    expect(captionOf({ number: 3 }, "/tmp/my shot.png")).toBe("[Image 3] my shot.png")
+    expect(captionOf({ number: 1 }, undefined)).toBe("[Image 1]")
   })
 })

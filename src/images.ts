@@ -1,169 +1,238 @@
-import type { Plugin } from "@opencode/plugin/tui"
 import { spawn } from "node:child_process"
-import { mkdir, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { extname, join } from "node:path"
 
-type Context = Plugin.Context
+/** One `[Image N]` placeholder found in the composer text. */
+export type ImageToken = { text: string; number: number; start: number; end: number }
 
-export type SessionImage = {
-  key: string
-  number: number
-  mime: string
-  name?: string
-  /** A data URI or a local file path, ready for <image source>. */
-  source: string
-  queued: boolean
-}
+/** A hoverable rectangle over one visible segment of an `[Image N]` token. */
+export type ImageZone = ImageToken & { row: number; col: number; width: number }
 
-const isImage = (mime: string | undefined): mime is string => Boolean(mime?.startsWith("image/"))
+const TOKEN = /\[Image (\d+)\]/g
 
-const base64ish = (value: string) => value.length > 0 && /^[A-Za-z0-9+/=\r\n]+$/.test(value.slice(0, 64))
-
-function fromData(data: string, mime: string): string | undefined {
-  if (data.startsWith("data:")) return data
-  if (base64ish(data)) return `data:${mime};base64,${data}`
-  return undefined
-}
-
-function fromUri(uri: string): string | undefined {
-  if (uri.startsWith("data:")) return uri
-  if (uri.startsWith("file://")) {
-    try {
-      return decodeURIComponent(new URL(uri).pathname)
-    } catch {
-      return undefined
-    }
-  }
-  if (uri.startsWith("/")) return uri
-  return undefined
-}
-
-type FileAttachment = {
-  data: string
-  mime: string
-  name?: string
-  source?: { type: "inline" } | { type: "uri"; uri: string }
-}
-
-function attachmentSource(file: FileAttachment): string | undefined {
-  if (file.source?.type === "uri") {
-    const source = fromUri(file.source.uri)
-    if (source) return source
-  }
-  return fromData(file.data, file.mime)
-}
-
-function fileImage(file: FileAttachment, key: string, queued: boolean): SessionImage | undefined {
-  if (!isImage(file.mime)) return undefined
-  const source = attachmentSource(file)
-  if (!source) return undefined
-  return { key, number: 0, mime: file.mime, name: file.name, source, queued }
-}
-
-/** Images waiting in the session's inbox (queued prompts). */
-export function pendingImages(context: Context, sessionID: string): SessionImage[] {
-  const items = context.data.session.pending.list(sessionID) ?? []
-  const images: SessionImage[] = []
-  for (const item of items) {
-    if (item.type !== "user") continue
-    const files = item.payload.files ?? []
-    files.forEach((file, index) => {
-      const image = fileImage(file, `pending:${item.id}:${index}`, true)
-      if (image) images.push(image)
+/** Every `[Image N]` token in the text, in order. */
+export function findImageTokens(text: string): ImageToken[] {
+  const tokens: ImageToken[] = []
+  TOKEN.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = TOKEN.exec(text))) {
+    tokens.push({
+      text: match[0],
+      number: Number(match[1]),
+      start: match.index,
+      end: match.index + match[0].length,
     })
   }
-  return images.map((image, index) => ({ ...image, number: index + 1 }))
+  return tokens
 }
 
-/** Images sent in the session, oldest first: user attachments and completed tool file results. */
-export function messageImages(context: Context, sessionID: string): SessionImage[] {
-  const messages = context.data.session.message.list(sessionID) ?? []
-  const images: SessionImage[] = []
-  for (const message of messages) {
-    if (message.type === "user") {
-      const files = message.files ?? []
-      files.forEach((file, index) => {
-        const image = fileImage(file, `message:${message.id}:${index}`, false)
-        if (image) images.push(image)
-      })
-      continue
+/**
+ * Terminal display width: wide CJK/emoji code points take two cells, everything
+ * else one. Good enough for prompt text, which is ASCII most of the time.
+ */
+export function displayWidth(text: string): number {
+  let width = 0
+  for (const character of text) {
+    const code = character.codePointAt(0) ?? 0
+    width +=
+      code >= 0x1100 &&
+      (code <= 0x115f ||
+        (code >= 0x2e80 && code <= 0xa4cf) ||
+        (code >= 0xac00 && code <= 0xd7a3) ||
+        (code >= 0xf900 && code <= 0xfaff) ||
+        (code >= 0xfe30 && code <= 0xfe4f) ||
+        (code >= 0xff00 && code <= 0xff60) ||
+        (code >= 0xffe0 && code <= 0xffe6) ||
+        (code >= 0x20000 && code <= 0x3fffd))
+        ? 2
+        : 1
+  }
+  return width
+}
+
+/** Snapshot of the composer editor needed to place zones on screen. */
+export type ZoneGeometry = {
+  text: string
+  screenX: number
+  screenY: number
+  width: number
+  height: number
+  scrollY: number
+  offsetX: number
+  lineStartCols: readonly number[]
+  lineWidthCols: readonly number[]
+  lineSources: readonly number[]
+}
+
+/**
+ * Screen rectangles for every visible piece of every `[Image N]` token.
+ * Tokens wrapped across visual lines produce one zone per visible segment;
+ * tokens scrolled out of the editor are skipped.
+ */
+export function imageZones(geometry: ZoneGeometry): ImageZone[] {
+  const zones: ImageZone[] = []
+  const { text, lineSources, lineStartCols, lineWidthCols } = geometry
+  if (lineSources.length === 0) return zones
+
+  const lineStarts = [0]
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "\n") lineStarts.push(index + 1)
+  }
+
+  for (const token of findImageTokens(text)) {
+    let logical = 0
+    for (let index = 0; index < lineStarts.length; index += 1) {
+      if (lineStarts[index]! <= token.start) logical = index
     }
-    if (message.type !== "assistant") continue
-    for (const part of message.content ?? []) {
-      if (part.type !== "tool") continue
-      const state = part.state
-      if (state.status !== "completed") continue
-      for (const content of state.content ?? []) {
-        if (content.type !== "file") continue
-        if (!isImage(content.mime)) continue
-        const source = fromUri(content.uri)
-        if (!source) continue
-        images.push({
-          key: `tool:${message.id}:${part.id}:${images.length}`,
-          number: 0,
-          mime: content.mime,
-          name: content.name ?? undefined,
-          source,
-          queued: false,
-        })
+    const lineStart = lineStarts[logical]!
+    const tokenCol = displayWidth(text.slice(lineStart, token.start))
+    const tokenWidth = displayWidth(token.text)
+
+    for (let visual = 0; visual < lineSources.length; visual += 1) {
+      if (lineSources[visual] !== logical) continue
+      const startCol = lineStartCols[visual] ?? 0
+      const endCol = startCol + Math.max(lineWidthCols[visual] ?? 0, 1)
+      const from = Math.max(tokenCol, startCol)
+      const to = Math.min(tokenCol + tokenWidth, endCol)
+      if (to <= from) continue
+      const row = geometry.screenY + (visual - geometry.scrollY)
+      if (row < geometry.screenY || row >= geometry.screenY + geometry.height) continue
+      const col = geometry.screenX + (from - startCol) - geometry.offsetX
+      const width = Math.min(to - from, geometry.screenX + geometry.width - col)
+      if (width <= 0 || col < geometry.screenX) continue
+      zones.push({ ...token, row, col, width })
+    }
+  }
+  return zones
+}
+
+/** True when the trimmed text looks like a path to an image file. */
+export function isImagePath(value: string): boolean {
+  return /\.(avif|bmp|gif|heic|jpe?g|png|tiff?|webp)$/i.test(value.trim())
+}
+
+/**
+ * The image path inside pasted clipboard text: a bare path, a quoted path, a
+ * `file://` URL, or a newline separated list of any of those.
+ */
+export function pathFromText(text: string): string | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    const candidate = line.trim().replace(/^"(.*)"$/, "$1")
+    if (!candidate) continue
+    let path = candidate
+    if (candidate.startsWith("file://")) {
+      try {
+        path = decodeURIComponent(new URL(candidate).pathname)
+      } catch {
+        continue
       }
     }
+    if (isImagePath(path)) return path
   }
-  return images
+  return undefined
 }
 
-/** Every image of the session: queued ones first, then sent ones, deduplicated and numbered. */
-export function sessionImages(context: Context, sessionID: string): SessionImage[] {
-  const seen = new Set<string>()
-  const images: SessionImage[] = []
-  for (const image of [...pendingImages(context, sessionID), ...messageImages(context, sessionID)]) {
-    const fingerprint = `${image.mime}:${image.source.length}:${image.source.slice(0, 96)}`
-    if (seen.has(fingerprint)) continue
-    seen.add(fingerprint)
-    images.push({ ...image, number: images.length + 1 })
+export type ClipboardCapture = { kind: "image"; source: string } | { kind: "path"; source: string } | { kind: "none" }
+
+/** Parses the JSON emitted by the macOS capture script. */
+export function parseCapture(raw: string): ClipboardCapture {
+  try {
+    const parsed = JSON.parse(raw) as { kind?: string; b64?: string; text?: string }
+    if (parsed.kind === "png" && typeof parsed.b64 === "string" && parsed.b64.length > 0) {
+      return { kind: "image", source: `data:image/png;base64,${parsed.b64}` }
+    }
+    if (parsed.kind === "text" && typeof parsed.text === "string") {
+      const source = pathFromText(parsed.text)
+      if (source) return { kind: "path", source }
+    }
+  } catch {}
+  return { kind: "none" }
+}
+
+/** Human label for the preview card caption. */
+export function captionOf(zone: { number: number }, source: string | undefined): string {
+  if (!source) return `[Image ${zone.number}]`
+  if (source.startsWith("data:")) return `[Image ${zone.number}] clipboard`
+  const name = source.split(/[\\/]/).pop() ?? source
+  return `[Image ${zone.number}] ${name}`
+}
+
+/** Runs a command and resolves its stdout, or undefined on error, timeout or empty output. */
+function run(command: string, args: string[], timeoutMs = 3000): Promise<Buffer | undefined> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"] })
+    const chunks: Buffer[] = []
+    let settled = false
+    const finish = (value: Buffer | undefined) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      child.kill()
+      finish(undefined)
+    }, timeoutMs)
+    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk))
+    child.on("error", () => finish(undefined))
+    child.on("close", (code) => {
+      const output = chunks.length > 0 ? Buffer.concat(chunks) : undefined
+      finish(code === 0 && output && output.length > 0 ? output : undefined)
+    })
+  })
+}
+
+/**
+ * macOS: read the pasteboard as PNG (converting TIFF when needed), or fall back
+ * to its text so a pasted image path can be used as the source.
+ */
+const MACOS_SCRIPT = `
+ObjC.import("AppKit");
+function run() {
+  const pasteboard = $.NSPasteboard.generalPasteboard;
+  let data = pasteboard.dataForType("public.png");
+  if (data.isNil()) {
+    const tiff = pasteboard.dataForType("public.tiff");
+    if (!tiff.isNil()) {
+      const rep = $.NSBitmapImageRep.imageRepWithData(tiff);
+      if (!rep.isNil()) data = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
+    }
   }
-  return images
+  if (data && !data.isNil()) {
+    return JSON.stringify({ kind: "png", b64: ObjC.unwrap(data.base64EncodedStringWithOptions(0)) });
+  }
+  const text = pasteboard.stringForType("public.utf8-plain-text");
+  if (!text.isNil()) return JSON.stringify({ kind: "text", text: ObjC.unwrap(text) });
+  return JSON.stringify({ kind: "none" });
+}
+run();
+`
+
+async function captureMacOS(): Promise<string | undefined> {
+  const raw = await run("osascript", ["-l", "JavaScript", "-e", MACOS_SCRIPT])
+  if (!raw) return undefined
+  const capture = parseCapture(raw.toString("utf8"))
+  return capture.kind === "none" ? undefined : capture.source
 }
 
-const extensionFor = (mime: string, fallback?: string) => {
-  if (fallback && extname(fallback)) return extname(fallback)
-  const subtype = mime.split("/")[1]?.split("+")[0] ?? "png"
-  return `.${subtype === "jpeg" ? "jpg" : subtype}`
+async function captureLinux(): Promise<string | undefined> {
+  const image =
+    (await run("wl-paste", ["--no-newline", "--type", "image/png"])) ??
+    (await run("xclip", ["-selection", "clipboard", "-t", "image/png", "-o"]))
+  if (image) return `data:image/png;base64,${image.toString("base64")}`
+  const text =
+    (await run("wl-paste", ["--no-newline"])) ?? (await run("xclip", ["-selection", "clipboard", "-o"]))
+  if (!text) return undefined
+  return pathFromText(text.toString("utf8"))
 }
 
-const safeName = (image: SessionImage) => {
-  const extension = extensionFor(image.mime, image.name)
-  const stem = (image.name ?? `image-${image.number}`).replace(/[^A-Za-z0-9._-]+/g, "_")
-  return stem.toLowerCase().endsWith(extension) ? stem : `${stem}${extension}`
+/**
+ * The image that was just pasted, read from the system clipboard while the
+ * paste is happening: PNG bytes when the clipboard holds an image, or the file
+ * path when the clipboard holds pasted path text.
+ */
+export async function captureClipboard(): Promise<string | undefined> {
+  try {
+    if (process.platform === "darwin") return await captureMacOS()
+    if (process.platform === "linux") return await captureLinux()
+  } catch {}
+  return undefined
 }
-
-/** Writes an inline image to a temp file so external programs can open it. */
-async function materialize(image: SessionImage): Promise<string | undefined> {
-  if (!image.source.startsWith("data:")) return image.source
-  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(image.source)
-  if (!match) return undefined
-  const [, , base64, payload] = match
-  const directory = join(tmpdir(), "opencode-image-preview")
-  await mkdir(directory, { recursive: true })
-  const file = join(directory, safeName(image))
-  await writeFile(file, Buffer.from(payload, base64 ? "base64" : "utf8"))
-  return file
-}
-
-/** Opens the image in the system viewer: Preview on macOS, the desktop default elsewhere. */
-export async function openImageInViewer(image: SessionImage): Promise<void> {
-  const file = await materialize(image).catch(() => undefined)
-  if (!file) return
-  const command =
-    process.platform === "darwin"
-      ? ["open", "-a", "Preview", file]
-      : process.platform === "win32"
-        ? ["explorer", file]
-        : ["xdg-open", file]
-  const child = spawn(command[0]!, command.slice(1), { detached: true, stdio: "ignore" })
-  child.unref()
-}
-
-export const captionOf = (image: SessionImage) =>
-  `[Image #${image.number}] ${image.mime.replace("image/", "").toUpperCase()}${image.name ? ` · ${image.name}` : ""}`
