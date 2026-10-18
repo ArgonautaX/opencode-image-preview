@@ -1,14 +1,26 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { existsSync } from "node:fs"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 /** One `[Image N]` placeholder found in the composer text. */
 export type ImageToken = { text: string; number: number; start: number; end: number }
 
-/** A hoverable rectangle over one visible segment of an `[Image N]` token. */
-export type ImageZone = ImageToken & { row: number; col: number; width: number }
+/** A previewable span of composer text: an `[Image N]` token or a path to an image file. */
+export type ImageTarget = {
+  text: string
+  start: number
+  end: number
+  kind: "token" | "path"
+  number?: number
+  /** Resolved absolute path, only for path targets. */
+  path?: string
+}
+
+/** A hoverable rectangle over one visible segment of an image target. */
+export type ImageZone = ImageTarget & { row: number; col: number; width: number }
 
 const TOKEN = /\[Image (\d+)\]/g
 
@@ -26,6 +38,40 @@ export function findImageTokens(text: string): ImageToken[] {
     })
   }
   return tokens
+}
+
+const PATH = /(?:file:\/\/|~\/|(?<![:/.\w])\/)[^\s]*/g
+const TRAILING = /[),.;:!?'"`]+$/
+
+/**
+ * Every path to an image file in the text: absolute, `~`-prefixed or a
+ * `file://` URL, with trailing punctuation stripped. URLs to other hosts and
+ * relative paths are ignored.
+ */
+export function findImagePaths(text: string): ImageTarget[] {
+  const paths: ImageTarget[] = []
+  PATH.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = PATH.exec(text))) {
+    const candidate = match[0].replace(TRAILING, "")
+    const path = resolveImagePath(candidate)
+    if (!path || !isImagePath(path)) continue
+    paths.push({ text: candidate, start: match.index, end: match.index + candidate.length, kind: "path", path })
+  }
+  return paths
+}
+
+/** Every `[Image N]` token and every image path in the text, in order. */
+export function findImageTargets(text: string): ImageTarget[] {
+  const targets: ImageTarget[] = findImageTokens(text).map((token) => ({
+    text: token.text,
+    start: token.start,
+    end: token.end,
+    kind: "token" as const,
+    number: token.number,
+  }))
+  targets.push(...findImagePaths(text))
+  return targets.sort((a, b) => a.start - b.start)
 }
 
 /**
@@ -67,9 +113,9 @@ export type ZoneGeometry = {
 }
 
 /**
- * Screen rectangles for every visible piece of every `[Image N]` token.
- * Tokens wrapped across visual lines produce one zone per visible segment;
- * tokens scrolled out of the editor are skipped.
+ * Screen rectangles for every visible piece of every image target: `[Image N]`
+ * tokens and image paths. Targets wrapped across visual lines produce one zone
+ * per visible segment; targets scrolled out of the editor are skipped.
  */
 export function imageZones(geometry: ZoneGeometry): ImageZone[] {
   const zones: ImageZone[] = []
@@ -81,14 +127,14 @@ export function imageZones(geometry: ZoneGeometry): ImageZone[] {
     if (text[index] === "\n") lineStarts.push(index + 1)
   }
 
-  for (const token of findImageTokens(text)) {
+  for (const target of findImageTargets(text)) {
     let logical = 0
     for (let index = 0; index < lineStarts.length; index += 1) {
-      if (lineStarts[index]! <= token.start) logical = index
+      if (lineStarts[index]! <= target.start) logical = index
     }
     const lineStart = lineStarts[logical]!
-    const tokenCol = displayWidth(text.slice(lineStart, token.start))
-    const tokenWidth = displayWidth(token.text)
+    const tokenCol = displayWidth(text.slice(lineStart, target.start))
+    const tokenWidth = displayWidth(target.text)
 
     for (let visual = 0; visual < lineSources.length; visual += 1) {
       if (lineSources[visual] !== logical) continue
@@ -102,7 +148,7 @@ export function imageZones(geometry: ZoneGeometry): ImageZone[] {
       const col = geometry.screenX + (from - startCol) - geometry.offsetX
       const width = Math.min(to - from, geometry.screenX + geometry.width - col)
       if (width <= 0 || col < geometry.screenX) continue
-      zones.push({ ...token, row, col, width })
+      zones.push({ ...target, row, col, width })
     }
   }
   return zones
@@ -114,22 +160,32 @@ export function isImagePath(value: string): boolean {
 }
 
 /**
+ * Absolute file path for a pasted or typed image reference: a bare or quoted
+ * path, a `~` prefix, or a `file://` URL. Returns undefined for anything else.
+ */
+export function resolveImagePath(raw: string, home = homedir()): string | undefined {
+  let path = raw.trim().replace(/^"(.*)"$/, "$1")
+  if (path.startsWith("file://")) {
+    try {
+      path = decodeURIComponent(new URL(path).pathname)
+    } catch {
+      return undefined
+    }
+  }
+  if (path === "~") return home
+  if (path.startsWith("~/")) path = join(home, path.slice(2))
+  if (!path.startsWith("/")) return undefined
+  return path
+}
+
+/**
  * The image path inside pasted clipboard text: a bare path, a quoted path, a
  * `file://` URL, or a newline separated list of any of those.
  */
 export function pathFromText(text: string): string | undefined {
   for (const line of text.split(/\r?\n/)) {
-    const candidate = line.trim().replace(/^"(.*)"$/, "$1")
-    if (!candidate) continue
-    let path = candidate
-    if (candidate.startsWith("file://")) {
-      try {
-        path = decodeURIComponent(new URL(candidate).pathname)
-      } catch {
-        continue
-      }
-    }
-    if (isImagePath(path)) return path
+    const path = resolveImagePath(line)
+    if (path && isImagePath(path)) return path
   }
   return undefined
 }
@@ -152,11 +208,16 @@ export function parseCapture(raw: string): ClipboardCapture {
 }
 
 /** Human label for the preview card caption. */
-export function captionOf(zone: { number: number }, source: string | undefined): string {
-  if (!source) return `[Image ${zone.number}]`
-  if (source.startsWith("data:")) return `[Image ${zone.number}] clipboard`
+export function captionOf(zone: { number?: number; text?: string }, source: string | undefined): string {
+  if (zone.number === undefined) {
+    const file = source ?? zone.text ?? ""
+    return file.split(/[\\/]/).pop() ?? file
+  }
+  const label = `[Image ${zone.number}]`
+  if (!source) return label
+  if (source.startsWith("data:")) return `${label} clipboard`
   const name = source.split(/[\\/]/).pop() ?? source
-  return `[Image ${zone.number}] ${name}`
+  return `${label} ${name}`
 }
 
 /** Runs a command and resolves its stdout, or undefined on error, timeout or empty output. */
@@ -281,4 +342,108 @@ export async function openInViewer(source: string): Promise<void> {
         : ["xdg-open", file]
   const child = spawn(command[0]!, command.slice(1), { detached: true, stdio: "ignore" })
   child.unref()
+}
+
+/** Size in bytes and pixel dimensions of an image source. */
+export type SourceInfo = { bytes?: number; width?: number; height?: number }
+
+/** Pixel dimensions from the PNG, GIF or JPEG header, when readable. */
+export function imageSize(bytes: Uint8Array): { width: number; height: number } | undefined {
+  if (bytes.length < 10) return undefined
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const isPng = bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+  if (isPng) return { width: view.getUint32(16), height: view.getUint32(20) }
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+    return { width: view.getUint16(6, true), height: view.getUint16(8, true) }
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2
+    while (offset + 9 <= bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1
+        continue
+      }
+      const marker = bytes[offset + 1]!
+      const isFrame = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
+      if (isFrame) return { width: view.getUint16(offset + 7), height: view.getUint16(offset + 5) }
+      const length = (bytes[offset + 2]! << 8) | bytes[offset + 3]!
+      if (length < 2) return undefined
+      offset += 2 + length
+    }
+  }
+  return undefined
+}
+
+/** Dimensions and size for the card caption, read lazily when the card opens. */
+export async function describeSource(source: string): Promise<SourceInfo> {
+  try {
+    if (source.startsWith("data:")) {
+      const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(source)
+      const payload = match?.[3]
+      if (!payload) return {}
+      const bytes = Buffer.from(payload, match[2] ? "base64" : "utf8")
+      return { bytes: bytes.length, ...imageSize(bytes) }
+    }
+    const bytes = await readFile(source)
+    return { bytes: bytes.length, ...imageSize(bytes) }
+  } catch {
+    return {}
+  }
+}
+
+/** Human byte size: `512 B`, `151 KB`, `1.2 MB`. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const kb = bytes / 1024
+  if (kb < 1024) return `${Math.round(kb)} KB`
+  return `${(kb / 1024).toFixed(1)} MB`
+}
+
+/** `1920×1080 · 151 KB`, omitting whatever is unknown. */
+export function infoLine(info: SourceInfo): string {
+  const parts: string[] = []
+  if (info.width && info.height) parts.push(`${info.width}×${info.height}`)
+  if (info.bytes !== undefined) parts.push(formatBytes(info.bytes))
+  return parts.join(" · ")
+}
+
+/** macOS needs a real PNG on the clipboard, so convert anything else first. */
+async function toPng(file: string): Promise<string | undefined> {
+  if (file.toLowerCase().endsWith(".png")) return file
+  const out = `${file}.clipboard.png`
+  await run("sips", ["-s", "format", "png", file, "--out", out])
+  return existsSync(out) ? out : undefined
+}
+
+/** Platform command that puts a PNG file on the system clipboard. */
+export function clipboardCommand(file: string, platform = process.platform): string[] | undefined {
+  if (platform === "darwin") {
+    const escaped = file.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+    return ["osascript", "-e", `set the clipboard to (read (POSIX file "${escaped}") as «class PNGf»)`]
+  }
+  if (platform === "linux") {
+    const escaped = file.replace(/'/g, "'\\''")
+    return [
+      "bash",
+      "-c",
+      `wl-copy --type image/png < '${escaped}' 2>/dev/null || xclip -selection clipboard -t image/png -i '${escaped}'`,
+    ]
+  }
+  if (platform === "win32") return ["powershell", "-NoProfile", "-Command", `Set-Clipboard -Path "${file}"`]
+  return undefined
+}
+
+/** Copies the image to the system clipboard. */
+export async function copyImageToClipboard(source: string): Promise<boolean> {
+  const file = await materialize(source).catch(() => undefined)
+  if (!file) return false
+  const target = process.platform === "darwin" ? await toPng(file).catch(() => undefined) : file
+  if (!target) return false
+  const command = clipboardCommand(target)
+  if (!command) return false
+  return new Promise((resolve) => {
+    const child = spawn(command[0]!, command.slice(1), { stdio: "ignore" })
+    child.on("error", () => resolve(false))
+    child.on("close", (code) => resolve(code === 0))
+  })
 }
