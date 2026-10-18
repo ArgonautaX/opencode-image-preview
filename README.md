@@ -132,7 +132,11 @@ native thumbnails back on in `~/.config/opencode/cli.json`.
 
 Any of the two install paths above doubles as the dev loop: saving a file reloads the plugin in a running TUI (the watcher subscribes to the resolved paths).
 
+Bun is the only package manager: `bun.lock` is the lockfile and CI installs with
+`bun install --frozen-lockfile`.
+
 ```sh
+bun install     # dependencies
 bun test        # unit tests for the pure helpers
 bun run typecheck
 ```
