@@ -123,6 +123,14 @@ you do that, remove any test plugins from the location first — two plugins
 rendering zones at the same cells shadow each other in the hit grid and the
 hover appears broken.
 
+## Branches
+
+- `main` — released code, tagged for releases; only receives merges from `develop`.
+- `develop` — integration branch; every feature and fix lands here first.
+- `feature/<name>`, `fix/<name>`, `docs/<name>`, `chore/<name>` — one unit of
+  work each, branched from `develop` and merged back with `git merge --no-ff`
+  (or a pull request) once `bun test` and `bun run typecheck` pass.
+
 ## License
 
 MIT. The interaction is inspired by midudev's better-claude (MIT); no code is shared.
