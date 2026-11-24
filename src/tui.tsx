@@ -7,6 +7,7 @@ import {
   captionOf,
   copyImageToClipboard,
   describeSource,
+  displayWidth,
   imageZones,
   infoLine,
   openInViewer,
@@ -36,18 +37,22 @@ type ComposerEditor = {
   cursorOffset: number
   focus(): void
   insertText(text: string): void
-  editorView: { getViewport(): { offsetX?: number } }
-  lineInfo: { lineStartCols: number[]; lineWidthCols: number[]; lineSources: number[] }
+  editorView: {
+    getViewport(): { offsetX?: number }
+    getLineInfo(): { lineStartCols: number[]; lineWidthCols: number[]; lineSources: number[] }
+  }
 }
 
 /** A hoverable zone bound to the editor it was computed from. */
-type Zone = ImageZone & { key: string }
+type Zone = ImageZone & { key: string; sourceKey: string }
 
 type Hooked = { original: (text: string) => unknown; wrapper: (text: string) => unknown }
 
 function readGeometry(editor: ComposerEditor): ZoneGeometry {
   const viewport = editor.editorView.getViewport()
-  const info = editor.lineInfo
+  // The renderable's `lineInfo` is a logical-line summary. Hover targets need
+  // the visual rows from EditorView, including wrapped lines.
+  const info = editor.editorView.getLineInfo()
   return {
     text: editor.plainText,
     screenX: editor.screenX,
@@ -135,7 +140,7 @@ function HoverOverlay(props: { prefs: { readonly enabled: boolean } }) {
     }, HOVER_GRACE_MS)
   }
 
-  const sourceFor = (zone: Zone) => (zone.kind === "path" ? zone.path : sources().get(zone.key))
+  const sourceFor = (zone: Zone) => (zone.kind === "path" ? zone.path : sources().get(zone.sourceKey))
 
   const openZone = (zone: Zone) => {
     const source = sourceFor(zone)
@@ -176,7 +181,11 @@ function HoverOverlay(props: { prefs: { readonly enabled: boolean } }) {
       hooked.add(current)
       installInsertHook(current, capture(current.id))
     }
-    const next = imageZones(readGeometry(current)).map((zone) => ({ ...zone, key: `${current.id}:${zone.text}` }))
+    const next = imageZones(readGeometry(current)).map((zone) => ({
+      ...zone,
+      key: `${current.id}:${zone.start}:${zone.kind}`,
+      sourceKey: `${current.id}:${zone.text}`,
+    }))
     if (JSON.stringify(next) === JSON.stringify(zones())) return
     setZones(next)
     const hoveredKey = hovered()?.key
@@ -191,7 +200,7 @@ function HoverOverlay(props: { prefs: { readonly enabled: boolean } }) {
   const source = createMemo(() => {
     const zone = hovered()
     if (!zone) return undefined
-    return zone.kind === "path" ? zone.path : sources().get(zone.key)
+    return zone.kind === "path" ? zone.path : sources().get(zone.sourceKey)
   })
 
   const [infos, setInfos] = createSignal(new Map<string, SourceInfo>())
@@ -217,8 +226,29 @@ function HoverOverlay(props: { prefs: { readonly enabled: boolean } }) {
     return line ? `${label} · ${line}` : label
   })
 
-  const cardWidth = () => Math.max(24, Math.min(72, dimensions().width - 10))
-  const cardHeight = () => Math.max(6, Math.min(22, Math.floor(dimensions().height / 3)))
+  const maxCardWidth = () => Math.max(1, Math.min(74, dimensions().width - 2))
+  const maxImageWidth = () => Math.max(1, maxCardWidth() - 4)
+  const maxImageHeight = () => Math.max(1, Math.min(18, Math.floor(dimensions().height / 3)))
+  const imageAspect = () => {
+    const src = source()
+    const info = src ? infos().get(src) : undefined
+    return info?.width && info.height ? info.width / info.height : 16 / 10
+  }
+  // Terminal cells are roughly twice as tall as they are wide. Size the image
+  // by its aspect ratio, then let the caption/actions widen small-image cards.
+  const imageWidth = () =>
+    source() ? Math.min(maxImageWidth(), Math.max(1, Math.ceil(imageAspect() * maxImageHeight() * 2))) : 1
+  const imageHeight = () => Math.max(1, Math.min(maxImageHeight(), Math.ceil(imageWidth() / imageAspect() / 2)))
+  const cardWidth = () => {
+    const contentWidth = Math.max(
+      imageWidth(),
+      displayWidth(caption()) + 2,
+      source() ? 0 : displayWidth("preview unavailable") + 2,
+      source() ? displayWidth("↗ open") + displayWidth("⧉ copy") + 4 : 1,
+    )
+    return Math.min(maxCardWidth(), Math.max(24, contentWidth + 4))
+  }
+  const cardHeight = () => imageHeight() + (source() ? 2 : 1) + 2
 
   const cardTop = () => {
     const zone = hovered()
@@ -263,13 +293,13 @@ function HoverOverlay(props: { prefs: { readonly enabled: boolean } }) {
             position="absolute"
             top={cardTop()}
             left={cardLeft()}
-            width={cardWidth() + 2}
+            width={cardWidth()}
             paddingLeft={1}
             paddingRight={1}
             border
             borderStyle="rounded"
             borderColor={context.theme.border.base}
-            backgroundColor={context.theme.background.raised.base}
+            backgroundColor={context.theme.background.base}
             flexDirection="column"
             zIndex={2001}
             onMouseOver={() => show(zone())}
@@ -288,8 +318,8 @@ function HoverOverlay(props: { prefs: { readonly enabled: boolean } }) {
                   source={src()}
                   fit="fit"
                   protocol="auto"
-                  width={cardWidth()}
-                  height={cardHeight()}
+                  width={imageWidth()}
+                  height={imageHeight()}
                   onMouseOver={() => show(zone())}
                   onError={() => {}}
                 />

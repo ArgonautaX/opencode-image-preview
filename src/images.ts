@@ -123,8 +123,18 @@ export function imageZones(geometry: ZoneGeometry): ImageZone[] {
   if (lineSources.length === 0) return zones
 
   const lineStarts = [0]
+  const logicalStartCols = [0]
+  let logicalBase = 0
+  let logicalColumn = 0
   for (let index = 0; index < text.length; index += 1) {
-    if (text[index] === "\n") lineStarts.push(index + 1)
+    if (text[index] === "\n") {
+      lineStarts.push(index + 1)
+      logicalBase += logicalColumn + 1
+      logicalStartCols.push(logicalBase)
+      logicalColumn = 0
+      continue
+    }
+    logicalColumn += displayWidth(text[index]!)
   }
 
   for (const target of findImageTargets(text)) {
@@ -133,7 +143,10 @@ export function imageZones(geometry: ZoneGeometry): ImageZone[] {
       if (lineStarts[index]! <= target.start) logical = index
     }
     const lineStart = lineStarts[logical]!
-    const tokenCol = displayWidth(text.slice(lineStart, target.start))
+    // OpenTUI's lineStartCols are absolute display columns across the complete
+    // buffer, including one column for each newline, not columns relative to
+    // each logical line.
+    const tokenCol = logicalStartCols[logical]! + displayWidth(text.slice(lineStart, target.start))
     const tokenWidth = displayWidth(target.text)
 
     for (let visual = 0; visual < lineSources.length; visual += 1) {
@@ -143,7 +156,10 @@ export function imageZones(geometry: ZoneGeometry): ImageZone[] {
       const from = Math.max(tokenCol, startCol)
       const to = Math.min(tokenCol + tokenWidth, endCol)
       if (to <= from) continue
-      const row = geometry.screenY + (visual - geometry.scrollY)
+      // EditorView.getLineInfo() reports only visible rows. Its array index is
+      // already viewport-relative; subtracting scrollY here double-scrolled
+      // hit targets off screen as soon as the composer overflowed vertically.
+      const row = geometry.screenY + visual
       if (row < geometry.screenY || row >= geometry.screenY + geometry.height) continue
       const col = geometry.screenX + (from - startCol) - geometry.offsetX
       const width = Math.min(to - from, geometry.screenX + geometry.width - col)
