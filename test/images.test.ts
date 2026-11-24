@@ -102,12 +102,28 @@ describe("imageZones", () => {
     const zones = imageZones(
       geometry({
         text: "first\nsecond [Image 3]",
-        lineStartCols: [0, 0],
+        lineStartCols: [0, 6],
         lineWidthCols: [5, 17],
         lineSources: [0, 1],
       }),
     )
     expect(zones[0]!).toMatchObject({ row: 6, col: 17, width: 9 })
+  })
+
+  test("maps targets after Ctrl+Enter-style blank lines to their own rows", () => {
+    const zones = imageZones(
+      geometry({
+        text: "first line\n\nsecond line [Image 2]\n\n[Image 3]",
+        height: 10,
+        lineStartCols: [0, 11, 12, 34, 35],
+        lineWidthCols: [10, 0, 21, 0, 9],
+        lineSources: [0, 1, 2, 3, 4],
+      }),
+    )
+    expect(zones).toMatchObject([
+      { text: "[Image 2]", row: 7, col: 22, width: 9 },
+      { text: "[Image 3]", row: 9, col: 10, width: 9 },
+    ])
   })
 
   test("skips tokens scrolled out of the editor", () => {
@@ -116,12 +132,27 @@ describe("imageZones", () => {
         text: "[Image 1]\nsecond",
         height: 1,
         scrollY: 1,
-        lineStartCols: [0, 0],
-        lineWidthCols: [9, 6],
-        lineSources: [0, 1],
+        lineStartCols: [10],
+        lineWidthCols: [6],
+        lineSources: [1],
       }),
     )
     expect(zones).toEqual([])
+  })
+
+  test("places visible rows relative to the viewport after vertical scrolling", () => {
+    const text = Array.from({ length: 12 }, (_, index) => `line ${index} [Image ${index + 1}]`).join("\n")
+    const zones = imageZones(
+      geometry({
+        text,
+        height: 5,
+        scrollY: 7,
+        lineStartCols: [119, 136, 153, 171, 190],
+        lineWidthCols: [16, 16, 17, 18, 18],
+        lineSources: [7, 8, 9, 10, 11],
+      }),
+    )
+    expect(zones.find((zone) => zone.text === "[Image 12]")).toMatchObject({ row: 9, col: 18, width: 10 })
   })
 
   test("clamps the zone to the editor's right edge", () => {
